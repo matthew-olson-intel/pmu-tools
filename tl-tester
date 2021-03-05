@@ -263,7 +263,7 @@ done
 
 for j in $NOSMTCPUS ; do
 	[ "$MATCH" != "" -a "$MATCH" != "$j" ] && continue
-$WRAP ./toplev.py --force-cpu $j $OPT -l1 $LOAD 2>&1 | tee log$$.$j
+OCVERBOSE=1 $WRAP ./toplev.py --force-cpu $j $OPT -l1 $LOAD 2>&1 | tee log$$.$j
 # SLM now needs two groups
 [ $j != "slm" ] && onegroup log$$.$j
 checklog log$$.$j
