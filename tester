@@ -23,6 +23,8 @@ trap failed ERR 0
 # handle unknown event
 $PERF stat -e branch-misses true
 
+export OCVERBOSE=1
+
 checklist()
 {
 	echo cpu $1 = ${cpus[$1]}
@@ -31,7 +33,9 @@ checklist()
 	EVENTMAP=${cpus[$1]} $WRAP ./ocperf.py list # > /dev/null
 
 	# see if all events are visible
-	R=$(EVENTMAP=${cpus[$1]} $WRAP ./ocperf.py list | wc -l)
+	EVENTMAP=${cpus[$1]} $WRAP ./ocperf.py list > full-list
+	cat full-list
+	$=$(wc -l full-list)
 	if [ $[$R - $BASELEN] -lt $2 ]; then
 		echo $1 list mismatch $[$R - $BASELEN]
 		exit 1
