@@ -35,7 +35,7 @@ checklist()
 	# see if all events are visible
 	EVENTMAP=${cpus[$1]} $WRAP ./ocperf.py list > full-list
 	cat full-list
-	$=$(wc -l full-list)
+	R=$(wc -l full-list)
 	if [ $[$R - $BASELEN] -lt $2 ]; then
 		echo $1 list mismatch $[$R - $BASELEN]
 		exit 1
