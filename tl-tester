@@ -34,7 +34,7 @@ NORES="${NORES:-}"
 PERF=${PERF:-perf}
 NOCPUS="${NOCPUS:-}"
 NUM_RUNNERS="${NUM_RUNNERS:-}"
-NOMULTIPLEX="${NOMULTIPLEX:---no-multiplex}"
+NOMULTIPLEX="${NOMULTIPLEX:---no-multiplex --perf}"
 ONLYCPU="${ONLYCPU:-}"
 
 if [ -n "$WRAP" ] ; then
@@ -43,7 +43,7 @@ else
 	PYTHON=python
 fi
 
-OPT="$OPT --perf"
+OPT="${OPT:-}"
 
 case "$PERF" in
 *fake-perf.py) NORES=1 ;;
@@ -69,17 +69,31 @@ trap failed ERR 0
 
 rm -f nflog$$
 
+(
+echo '#include <stdio.h>'
+for ((i=0;i<500;i++)) ; do
+	echo "void func$i(void) { int i; for(i=0;i<10;i++) printf(\"Hello $i\n\"); }"
+done
+echo 'int main(void) {'
+for ((i=0;i<500;i++)) ; do
+	echo "    func$i();"
+done
+echo '}'
+) > longhello.c
+
 cat >hello.c <<EOL
 #include <stdio.h>
 int main() {
-	printf("Hello world\n");
-	return 0;
+       printf("Hello world\n");
+       return 0;
 }
 EOL
 
+PS4='Line ${LINENO} '
 set -x
 
-LOAD="${LOAD:--- gcc -O3 -o /dev/null hello.c}"
+LOAD="${LOAD:--- gcc -O3 -o /dev/null longhello.c}"
+LOADQUICK="${LOADQUICK:--- gcc -O3 -o /dev/null hello.c}"
 LOADLONG=${LOADLONG:-./workloads/BC1s}
 LOAD0="-- taskset -c 0 $LOAD"
 
@@ -132,7 +146,7 @@ $WRAP ./toplev.py --force-cpu $DCPU $OPT --no-desc --metrics -x, -v -l4 $LOAD | 
 checklog0
 $WRAP ./toplev.py --force-cpu $DCPU $OPT -g --raw -v --debug --stats $ALL --kernel $LOAD | tee log$$
 checklog0
-$WRAP ./toplev.py --force-cpu $DCPU $OPT --no-desc --stats $ALL --kernel --valcsv val$$.csv $NOMULTIPLEX $LOAD | tee log$$
+$WRAP ./toplev.py --force-cpu $DCPU --perf $OPT --no-desc --stats $ALL --kernel --valcsv val$$.csv $NOMULTIPLEX $LOADQUICK | tee log$$
 checklog0
 grep :k log$$
 grep /k log$$
@@ -148,7 +162,7 @@ $WRAP ./toplev.py --force-cpu skl $OPT --filterquals --nodes '!+Bad_Speculation.
 [ -z "$NORES" ] && grep Mispredicts_Resteers log$$
 $WRAP ./toplev --force-cpu skl --filterquals $OPT --force-bn=Mispredicts_Resteers --force-bn=Frontend_Bound --force-bn=Fetch_Latency --force-bn Branch_Resteers --no-desc --drilldown -o log$$ $LOADLONG
 [ -z "$NORES" ] && grep Branch_Misprediction_Cost log$$
-[ -z "$NORES" ] && grep IpMispredict log$$
+#[ -z "$NORES" ] && grep IpMispredict log$$
 [ -z "$NORES" ] && grep Branch_Mispredicts log$$
 [ -z "$NORES" ] && grep Mispredicts_Resteers log$$
 rm log$$
@@ -206,12 +220,12 @@ if [ -z "$NOCPUS" ] ; then
 for j in $SMTCPUS ; do
 	[ "$MATCH" != "" -a "$MATCH" != "$j" ] && continue
 if ! grep -q hypervisor /proc/cpuinfo ; then
-FORCEHT=1 $WRAP ./toplev.py --force-cpu $j --force-topology topology --force-events -l1 --filterquals $OPT $LOAD 2>&1 | tee log$$.$j
+FORCEHT=1 $WRAP ./toplev.py --perf --force-cpu $j --force-topology topology --force-events -l1 --filterquals $OPT $LOAD 2>&1 | tee log$$.$j
 [ $j != "knl" ] && onegroup log$$.$j
 checklog log$$.$j
 notfound $j
 fi
-FORCEHT=0 $WRAP ./toplev.py --force-topology topology --force-cpu $j --force-events -l1 --filterquals $OPT $LOAD 2>&1 | tee log$$.$j
+FORCEHT=0 $WRAP ./toplev.py --perf --force-topology topology --force-cpu $j --force-events -l1 --filterquals $OPT $LOAD 2>&1 | tee log$$.$j
 [ $j != "knl" ] && onegroup log$$.$j
 checklog log$$.$j
 notfound $j
@@ -222,7 +236,8 @@ notfound $j
 FORCEHT=1 $WRAP ./toplev.py --force-topology topology --force-cpu $j --force-events $ALL --filterquals $OPT --user $LOAD 2>&1
 checklog log$$.$j
 notfound $j
-
+FORCEHT=1 $WRAP ./toplev.py --force-topology topology --thread --force-cpu $j --force-events $ALL --filterquals $OPT --user $LOAD 2>&1
+checklog log$$.$j
 fi
 FORCEHT=0 $WRAP ./toplev.py --force-topology topology --force-cpu $j --force-events --filterquals $ALL $OPT $LOAD 2>&1 | tee log$$.$j
 checklog log$$.$j
@@ -279,7 +294,7 @@ done
 
 for j in $NOSMTCPUS ; do
 	[ "$MATCH" != "" -a "$MATCH" != "$j" ] && continue
-$WRAP ./toplev.py --force-cpu $j $OPT -l1 $LOAD 2>&1 | tee log$$.$j
+$WRAP ./toplev.py --perf --force-cpu $j $OPT -l1 $LOAD 2>&1 | tee log$$.$j
 # SLM now needs two groups
 [ $j != "slm" ] && onegroup log$$.$j
 checklog log$$.$j
@@ -290,14 +305,14 @@ done
 fi
 
 # misc features
-$WRAP ./toplev.py -g --force-cpu $DCPU $OPT -o log$$ --valcsv val$$.csv --perf-output perfo$$.csv --ignore-errata --stats --metrics --force-events $NOMULTIPLEX -l4 $LOAD
+$WRAP ./toplev.py -g --force-cpu $DCPU $OPT -o log$$ --valcsv val$$.csv --perf-output perfo$$.csv --ignore-errata --stats --metrics --force-events $NOMULTIPLEX -l4 $LOADQUICK
 [ -z "$NORES" ] && grep Turbo_Utilization log$$
 [ -z "$NORES" ] && grep -v "not supported" log$$
 rm log$$ val$$.csv perfo$$.csv
 
 $WRAP ./toplev.py -I 100 -g --force-cpu $DCPU $OPT -o log$$ --valcsv val$$.csv --perf-output perfo$$.csv --ignore-errata \
 	--stats --force-events $NOMULTIPLEX -l3 --perf-summary perfs$$.csv \
-	$LOADLONG
+	$LOADQUICK
 $WRAP ./toplev.py -I 100 -g -l3 --force-cpu $DCPU $OPT --ignore-errata --force-events --import perfs$$.csv
 rm perfo$$.csv perfs$$.csv
 
@@ -344,7 +359,7 @@ $WRAP ./toplev.py $SHOPT --import x$$.csv.gz -o y$$.out.gz
 [ -z "$NORES" ] && zgrep IPC y$$.out.gz
 rm x$$.csv.gz y$$.out.gz
 
-$WRAP ./toplev.py --force-cpu $DCPU $OPT --stats --metrics $NOMULTIPLEX --columns -l4 $LOAD
+$WRAP ./toplev.py --force-cpu $DCPU $OPT --stats --metrics $NOMULTIPLEX --columns -l4 $LOADQUICK
 [ -z "$ONLYCPU" ] && $WRAP ./toplev.py --force-cpu bdw $OPT --cpu 0,1,2,3 --force-cpuinfo bdw-cpuinfo --stats --metrics --per-core --columns --filterquals -l4 $LOAD
 DURATION_TIME=0 $WRAP ./toplev.py -I100 --force-cpu $DCPU $OPT --all $LOAD
 #NUM_RUNNERS=2 $WRAP ./toplev.py -I100 --force-cpu $DCPU $OPT --all $LOAD
@@ -409,10 +424,10 @@ FORCEHT=1 $WRAP ./toplev.py --force-cpu $DCPU $OPT --stats --metrics  --per-thre
 rm out$$-*
 $WRAP ./toplev.py --force-cpu $DCPU $OPT --all --single-thread  --per-thread --per-core --per-socket --filterquals --summary -a -l4 $LOAD
 $WRAP ./toplev.py --force-cpu $DCPU $OPT --no-perf --no-desc --power -l4 $LOAD
-$WRAP ./toplev.py --force-cpu $DCPU $OPT --no-desc $ALL --no-group $LOAD
+$WRAP ./toplev.py --force-cpu $DCPU $OPT --no-desc $ALL --abbrev --no-group $LOAD
 $WRAP ./toplev.py --force-cpu $DCPU $OPT --no-desc --sw -l4 $LOAD
 FORCE_COUNTERS=4 \
-$WRAP ./toplev.py -l1 --force-cpu $DCPU $OPT --single-thread --user $LOAD | tee log$$
+$WRAP ./toplev.py --perf -l1 --force-cpu $DCPU $OPT --single-thread --user $LOAD | tee log$$
 onegroup log$$
 grep '[:/]u' log$$
 grep /u log$$
@@ -453,7 +468,7 @@ $WRAP ./toplev.py --force-cpu $DCPU $OPT -l4 -I 100 --valcsv val$$.csv --columns
 [ -z "$NORES" ] && zgrep Frontend out$$.gz
 rm out$$.gz
 $WRAP ./toplev.py --force-cpu $DCPU $OPT --all --valcsv val$$.csv.gz $LOAD | tee log$$
-$WRAP ./toplev.py --force-cpu $DCPU $OPT --all --valcsv val$$.csv.xz --user $LOAD | tee log$$
+$WRAP ./toplev.py --perf --force-cpu $DCPU $OPT --all --valcsv val$$.csv.xz --user $LOAD | tee log$$
 if [ -z "$NORES" ] ; then
 grep cpu_clk_unhalted val$$.csv
 grep Timestamp val$$.csv
