@@ -578,6 +578,9 @@ g.add_argument('--metric-group', help='Add (+) or remove (-|^) metric groups of 
                'comma separated list from --list-metric-groups.', default=None)
 g.add_argument('--pinned', help='Run topdown metrics (on ICL+) pinned', action='store_true')
 g.add_argument('--exclusive', help='Use exclusive groups. Requires new kernel and new perf', action='store_true')
+g.add_argument('--thread',
+        help="Enable per thread SMT measurements for pre-ICL, at the cost of more multiplexing.",
+        action='store_true')
 
 g = p.add_argument_group('Query nodes')
 g.add_argument('--list-metrics', help='List all metrics. Can be followed by prefixes to limit, ^ for full match',
@@ -632,6 +635,7 @@ g.add_argument('--idle-threshold', help="Hide idle CPUs (default <5%% of busiest
                default=None, type=float)
 g.add_argument('--no-output', help="Don't print computed output. Does not affect --summary.", action='store_true')
 g.add_argument('--no-mux', help="Don't print mux statistics", action="store_true")
+g.add_argument('--abbrev', help="Abbreviate node names in output", action="store_true")
 
 g = p.add_argument_group('Environment')
 g.add_argument('--force-cpu', help='Force CPU type', choices=[x[0] for x in known_cpus])
@@ -2327,8 +2331,8 @@ def adjust_ev(ev, level):
     # use the programmable slots for non L1 so that level 1
     # can (mostly) run in parallel with other groups.
     # this also helps for old or non ICL kernels
-    if ev == "TOPDOWN.SLOTS" and ((run_l1_parallel and level != 1) or not ectx.slots_available):
-        ev = "TOPDOWN.SLOTS_P"
+    if isinstance(ev, str) and ev.startswith("TOPDOWN.SLOTS") and ((run_l1_parallel and level != 1) or not ectx.slots_available):
+        ev = ev.replace("TOPDOWN.SLOTS", "TOPDOWN.SLOTS_P")
     return ev
 
 def ev_collect(ev, level, obj):
@@ -2345,10 +2349,10 @@ def ev_collect(ev, level, obj):
 
     key = (ev, level, obj.name)
     if key not in obj.evlevels:
-        if ev == "TOPDOWN.SLOTS" or ev.startswith("PERF_METRICS."):
+        if ev.startswith("TOPDOWN.SLOTS") or ev.startswith("PERF_METRICS."):
             ind = [x[1] == level for x in obj.evlevels]
             ins = ind.index(True) if any(ind) else 0
-            obj.evlevels.insert(ins + (0 if ev == "TOPDOWN.SLOTS" else 1), key)
+            obj.evlevels.insert(ins + (0 if ev.startswith("TOPDOWN.SLOTS") else 1), key)
         else:
             obj.evlevels.append(key)
         if safe_ref(obj, 'nogroup') or ev == "duration_time":
@@ -2519,6 +2523,13 @@ def full_name(obj):
         name = obj.name + "." + name
     return name
 
+def full_name_output(obj):
+    if args.abbrev:
+        if 'parent' in obj.__dict__ and obj.parent:
+            return "..." + obj.name
+        return obj.name
+    return full_name(obj)
+
 def package_node(obj):
     return safe_ref(obj, 'domain') in ("Package", "SystemMetric")
 
@@ -2574,7 +2585,12 @@ Warning: Hyper Threading may lead to incorrect measurements for this node.
 Suggest to re-measure with HT off (run cputop.py "thread == 1" offline | sh)."""
     return desc
 
-def node_filter(obj, default, sibmatch):
+def get_mg(obj):
+    if has(obj, 'metricgroup'):
+        return obj.metricgroup
+    return []
+
+def node_filter(obj, default, sibmatch, mgroups):
     if args.nodes:
         fname = full_name(obj)
         name = obj.name
@@ -2598,6 +2614,9 @@ def node_filter(obj, default, sibmatch):
         def has_siblings(j, obj):
             return j.endswith("^") and 'sibling' in obj.__dict__ and obj.sibling
 
+        def has_mg(j, obj):
+            return j.endswith("^") and get_mg(obj)
+
         nodes = args.nodes
         if nodes[0] == '!':
             default = False
@@ -2615,6 +2634,8 @@ def node_filter(obj, default, sibmatch):
             if match(j[i:], True):
                 if has_siblings(j, obj):
                     sibmatch |= set(obj.sibling)
+                if has_mg(j, obj):
+                    mgroups |= set(obj.metricgroup)
                 return True
             if has_siblings(j, obj):
                 for sib in obj.sibling:
@@ -3006,7 +3027,7 @@ def get_uval(ob):
 # pre compute column lengths
 def compute_column_lengths(olist, out):
     for obj in olist:
-        out.set_hdr(full_name(obj), obj_area(obj))
+        out.set_hdr(full_name_output(obj), obj_area(obj))
         if obj.metric:
             out.set_unit(metric_unit(obj))
         else:
@@ -3049,7 +3070,7 @@ class Printer(object):
                         idlemark)
             else:
                 out.ratio(obj_area(obj),
-                        full_name(obj), val, timestamp,
+                        full_name_output(obj), val, timestamp,
                         "%" + node_unit(obj),
                         desc,
                         title,
@@ -3083,7 +3104,8 @@ def check_nodes(runner_list, nodesarg):
                 if fnmatch(k.name, s) or fnmatch(full_name(k), s):
                     return True
         return False
-    valid = map(valid_node, options)
+
+    valid = [o for o in options if valid_node(o)]
     if not all(valid):
         sys.exit("Unknown node(s) in --nodes: " +
                  " ".join([o for o, v in zip(options, valid) if not v]))
@@ -3150,6 +3172,7 @@ class Runner(object):
                     parents += get_parents(s)
 
         self.sibmatch = set()
+        mgroups = set()
 
         def want_node(obj):
             if args.reduced and has(obj, 'server') and not obj.server:
@@ -3162,12 +3185,21 @@ class Runner(object):
                     obj in parents) and obj.name not in remove_met
             if not obj.metric and obj.level <= self.max_level:
                 want = True
-            return node_filter(obj, want, self.sibmatch)
+            return node_filter(obj, want, self.sibmatch, mgroups)
 
         # this updates sibmatch
-        fmatch = list(map(want_node, self.olist))
-        # now keep what is both in fmatch and sibmatch
-        self.olist = [obj for obj, fil in zip(self.olist, fmatch) if fil or obj in self.sibmatch]
+        fmatch = [want_node(x) for x in self.olist]
+
+        def select_node(obj):
+            if obj in self.sibmatch:
+                return True
+            if set(get_mg(obj)) & mgroups:
+                return True
+            return False
+
+        # now keep what is both in fmatch and sibmatch and mgroups
+        # assume that mgroups matches do not need propagation
+        self.olist = [obj for obj, fil in zip(self.olist, fmatch) if fil or select_node(obj)]
         if len(self.olist) == 0:
             sys.exit("All nodes disabled")
 
@@ -3648,63 +3680,60 @@ def init_model(model, runner):
 
     return version
 
+def legacy_smt_setup(model):
+    global smt_mode
+    if args.thread:
+        model.ebs_mode = cpu.ht
+        return
+    model.smt_enabled = cpu.ht
+    smt_mode |= cpu.ht
+
 def model_setup(runner, cpuname):
     global smt_mode
     if cpuname == "ivb":
         import ivb_client_ratios
-        ivb_client_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = ivb_client_ratios
+        legacy_smt_setup(model)
     elif cpuname == "ivt":
         import ivb_server_ratios
-        ivb_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = ivb_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "snb":
         import snb_client_ratios
-        snb_client_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = snb_client_ratios
+        legacy_smt_setup(model)
     elif cpuname == "jkt":
         import jkt_server_ratios
-        jkt_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = jkt_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "hsw":
         import hsw_client_ratios
-        hsw_client_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = hsw_client_ratios
+        legacy_smt_setup(model)
     elif cpuname == "hsx":
         import hsx_server_ratios
-        hsx_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = hsx_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "bdw":
         import bdw_client_ratios
-        bdw_client_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = bdw_client_ratios
+        legacy_smt_setup(model)
     elif cpuname == "bdx":
         import bdx_server_ratios
-        bdx_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = bdx_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "skl":
         import skl_client_ratios
-        skl_client_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = skl_client_ratios
+        legacy_smt_setup(model)
     elif cpuname == "skx":
         import skx_server_ratios
-        skx_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = skx_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "clx":
         import clx_server_ratios
-        clx_server_ratios.smt_enabled = cpu.ht
-        smt_mode |= cpu.ht
         model = clx_server_ratios
+        legacy_smt_setup(model)
     elif cpuname == "icx":
         import icx_server_ratios
         icx_server_ratios.smt_enabled = cpu.ht
